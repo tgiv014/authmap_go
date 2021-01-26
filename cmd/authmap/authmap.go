@@ -64,7 +64,7 @@ func main() {
 	}
 	defer db.Close()
 
-	client := influxdb2.NewClient("http://localhost:8086", "my-token")
+	client := influxdb2.NewClient("http://influxdb:8086", "my-token")
 	writeAPI := client.WriteAPIBlocking("yeet.retweet", "db0")
 
 	start := time.Now()
