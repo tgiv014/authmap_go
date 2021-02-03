@@ -108,10 +108,10 @@ func main() {
 			fmt.Println(record.Location.Longitude)
 			p := influxdb2.NewPointWithMeasurement("authattempt").
 				AddTag("type", lineTag).
+				AddTag("ip", ipStr).
 				AddField("country", record.Country.Names["en"]).
 				AddField("lat", record.Location.Latitude).
 				AddField("lon", record.Location.Longitude).
-				AddField("ip", ipStr).
 				SetTime(time.Now())
 			writeAPI.WritePoint(context.Background(), p)
 		}
