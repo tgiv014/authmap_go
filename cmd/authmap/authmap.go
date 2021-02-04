@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -12,7 +13,29 @@ import (
 	"github.com/hpcloud/tail"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/oschwald/geoip2-golang"
+	"gopkg.in/yaml.v2"
 )
+
+type InfluxConfig struct {
+	URL   string `yaml:"url"`
+	Token string `yaml:"token"`
+	Org   string `yaml:"org"`
+	DB    string `yaml:"db"`
+}
+type GeoLiteConfig struct {
+	Path string `yaml:"path"`
+}
+type AuthConfig struct {
+	Path       string `yaml:"path"`
+	WaitLength string `yaml:"wait_length"`
+}
+type Config struct {
+	Influx  InfluxConfig  `yaml:"influx"`
+	GeoLite GeoLiteConfig `yaml:"geolite"`
+	Auth    AuthConfig    `yaml:"auth"`
+}
+
+const ConfigPath string = "/etc/authmap/config.yaml"
 
 var (
 	reSSHD    *regexp.Regexp
@@ -53,29 +76,87 @@ func init() {
 	}
 }
 
-func main() {
-	db, err := geoip2.Open("/etc/authmap/GeoLite2-City.mmdb")
-	if err != nil {
-		// Attempt to open a local copy if present
-		db, err = geoip2.Open("./GeoLite2-City.mmdb")
+func load_config() Config {
+	config := Config{
+		Influx: InfluxConfig{
+			URL:   "http://influxdb:8086",
+			Token: "",
+			Org:   "",
+			DB:    "db0",
+		},
+		GeoLite: GeoLiteConfig{
+			Path: "/etc/authmap/GeoLite2-City.mmdb",
+		},
+		Auth: AuthConfig{
+			Path:       "/var/log/auth.log",
+			WaitLength: "5s",
+		},
+	}
+	if _, err := os.Stat(ConfigPath); os.IsNotExist(err) {
+		// Configuration does not exists... Let's generate one
+		fmt.Println("Generating a default configuration")
+		cb, err := yaml.Marshal(&config)
 		if err != nil {
-			log.Fatal("Error opening GeoLite database", err)
+			log.Fatal("Unable to marshall default config.")
 		}
+		f, err := os.Create(ConfigPath)
+		if err != nil {
+			log.Fatal("Unable to open new config file")
+		}
+		_, err = f.Write(cb)
+		if err != nil {
+			log.Fatal("Unable to write to new config file")
+		}
+		err = f.Close()
+		if err != nil {
+			log.Fatal("Encountered error while closing config file")
+		}
+
+	}
+	f, err := os.Open(ConfigPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b, err := ioutil.ReadAll(f)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = f.Close()
+	if err != nil {
+		log.Fatal("Encountered error while closing config file")
+	}
+
+	err = yaml.Unmarshal([]byte(b), &config)
+	if err != nil {
+		log.Fatalf("error: %v", err)
+	}
+	return config
+}
+
+func main() {
+	config := load_config()
+	db, err := geoip2.Open(config.GeoLite.Path)
+	if err != nil {
+		log.Fatal("Error opening GeoLite database", err)
 	}
 	defer db.Close()
 
-	client := influxdb2.NewClient("http://influxdb:8086", "my-token")
-	writeAPI := client.WriteAPIBlocking("yeet.retweet", "db0")
+	client := influxdb2.NewClient(config.Influx.URL, config.Influx.Token)
+	writeAPI := client.WriteAPIBlocking(config.Influx.Org, config.Influx.DB)
 
 	start := time.Now()
-	if _, err := os.Stat("/var/log/auth.log"); os.IsNotExist(err) {
+	if _, err := os.Stat(config.Auth.Path); os.IsNotExist(err) {
 		log.Fatal("Could not find auth.log. If running in docker, make sure you have bound it")
 	}
+	waitDuration, err := time.ParseDuration(config.Auth.WaitLength)
+	if err != nil {
+		log.Fatal("Could not parse duration")
+	}
 	// This will tail the file indefinitely
-	t, err := tail.TailFile("/var/log/auth.log", tail.Config{ReOpen: true, MustExist: true, Follow: true, Logger: tail.DiscardingLogger})
+	t, err := tail.TailFile(config.Auth.Path, tail.Config{ReOpen: true, MustExist: true, Follow: true, Logger: tail.DiscardingLogger})
 	for line := range t.Lines {
 		// A little hacky... but it forces us to wait for new logs
-		if line.Time.Sub(start) > 5*time.Second {
+		if line.Time.Sub(start) > waitDuration {
 			// Ensure logs are from sshd
 			if reSSHD.Find([]byte(line.Text)) == nil {
 				continue
